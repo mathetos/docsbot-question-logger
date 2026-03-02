@@ -1,5 +1,11 @@
 /**
- * Sheet operations: ensure structure, append Q&A rows, set dropdowns, read/write config.
+ * Sheet operations: ensure structure, insert Q&A rows, set dropdowns, read/write config.
+ *
+ * I/O strategy:
+ *   - Config sheet: read once into cache, dirty values flushed in a single setValues call.
+ *   - Q&A rows: inserted at the top (after header) so the sheet stays newest-first
+ *     without a post-write sort.  One setValues + one insertRowsAfter per sync.
+ *   - Validation rules are applied per-column-range, not per-row.
  */
 
 var SheetWriter = (function () {
@@ -7,14 +13,153 @@ var SheetWriter = (function () {
 
   var COL = Config.getCol();
   var HEADERS = Config.getHeadersQALog();
+  var NUM_COLS = HEADERS.length;
   var REVIEW_STATUS_VALUES = Config.getReviewStatusValues();
   var ACTION_NEEDED_VALUES = Config.getActionNeededValues();
   var CONFIG_KEYS = Config.getConfigKeys();
   var QA_SHEET_NAME = Config.getSheetQALogName();
   var CONFIG_SHEET_NAME = Config.getSheetConfigName();
 
+  // Google Sheets hard limit: 10,000,000 cells per spreadsheet
+  var MAX_CELLS_PER_WRITE = 10000000;
+
+  // ---------------------------------------------------------------------------
+  // Config cache: read once, write once
+  // ---------------------------------------------------------------------------
+
+  var _configCache = null;   // { key: { value: string, row: number } }
+  var _configDirty = {};     // keys that were changed since last flush
+  var _configSheet = null;   // cached Sheet reference
+
   /**
-   * Gets or creates the Q&A Log sheet and ensures headers.
+   * Ensures the Config sheet exists and returns it. Cached per execution.
+   * @param {Spreadsheet} ss
+   * @returns {Sheet}
+   */
+  function getOrCreateConfigSheet(ss) {
+    if (_configSheet) return _configSheet;
+    _configSheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+    if (!_configSheet) {
+      _configSheet = ss.insertSheet(CONFIG_SHEET_NAME);
+      _configSheet.getRange(1, 1, 1, 2).setValues([['Key', 'Value']]);
+      _configSheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+      _configSheet.setFrozenRows(1);
+      _configSheet.appendRow([CONFIG_KEYS.teamId, '']);
+      _configSheet.appendRow([CONFIG_KEYS.botId, '']);
+      _configSheet.appendRow([CONFIG_KEYS.lastSyncedAt, '']);
+      _configSheet.appendRow([CONFIG_KEYS.lastRunAt, '']);
+    }
+    return _configSheet;
+  }
+
+  /**
+   * Loads every key-value pair from the Config sheet into memory.
+   * Call once at the start of an execution that needs config values.
+   * @param {Spreadsheet} ss
+   */
+  function loadConfigCache(ss) {
+    var sheet = getOrCreateConfigSheet(ss);
+    var data = sheet.getDataRange().getValues();
+    _configCache = {};
+    _configDirty = {};
+    for (var i = 1; i < data.length; i++) {
+      var key = data[i][0] != null ? String(data[i][0]).trim() : '';
+      var val = data[i][1] != null ? String(data[i][1]).trim() : '';
+      if (key) {
+        _configCache[key] = { value: val, row: i + 1 };
+      }
+    }
+  }
+
+  /**
+   * Reads a config value from the in-memory cache.
+   * Falls back to a sheet read if the cache hasn't been loaded yet.
+   * @param {Spreadsheet} ss
+   * @param {string} key
+   * @returns {string}
+   */
+  function getConfigValue(ss, key) {
+    if (!_configCache) loadConfigCache(ss);
+    var entry = _configCache[key];
+    return entry ? entry.value : '';
+  }
+
+  /**
+   * Sets a config value in the in-memory cache and marks it dirty.
+   * The actual sheet write happens in flushConfigCache().
+   * @param {Spreadsheet} ss
+   * @param {string} key
+   * @param {string} value
+   */
+  function setConfigValue(ss, key, value) {
+    if (!_configCache) loadConfigCache(ss);
+    var strVal = value != null ? String(value).trim() : '';
+    var entry = _configCache[key];
+    if (entry) {
+      if (entry.value === strVal) return;
+      entry.value = strVal;
+    } else {
+      var sheet = getOrCreateConfigSheet(ss);
+      var nextRow = sheet.getLastRow() + 1;
+      _configCache[key] = { value: strVal, row: nextRow };
+    }
+    _configDirty[key] = true;
+  }
+
+  /**
+   * Writes all dirty config values back to the Config sheet in O(1) I/O.
+   * Reads the sheet once, mutates values in-memory, writes the full array back
+   * in a single setValues call.
+   * @param {Spreadsheet} ss
+   */
+  function flushConfigCache(ss) {
+    var dirtyKeys = Object.keys(_configDirty);
+    if (dirtyKeys.length === 0) return;
+    var sheet = getOrCreateConfigSheet(ss);
+
+    var lastRow = sheet.getLastRow();
+    var data = lastRow > 0 ? sheet.getRange(1, 1, lastRow, 2).getValues() : [];
+
+    var keyIndex = {};
+    for (var r = 1; r < data.length; r++) {
+      var k = data[r][0] != null ? String(data[r][0]).trim() : '';
+      if (k) keyIndex[k] = r;
+    }
+
+    for (var i = 0; i < dirtyKeys.length; i++) {
+      var key = dirtyKeys[i];
+      var entry = _configCache[key];
+      if (!entry) continue;
+
+      if (keyIndex[key] !== undefined) {
+        data[keyIndex[key]][1] = entry.value;
+        entry.row = keyIndex[key] + 1;
+      } else {
+        data.push([key, entry.value]);
+        entry.row = data.length;
+      }
+    }
+
+    sheet.getRange(1, 1, data.length, 2).setValues(data);
+    _configDirty = {};
+  }
+
+  /**
+   * Resets the config cache. Call at the end of an execution or if the Config
+   * sheet may have been changed externally (e.g. by menuSetupIds).
+   */
+  function resetConfigCache() {
+    _configCache = null;
+    _configDirty = {};
+    _configSheet = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Q&A Log sheet
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Gets or creates the Q&A Log sheet and ensures headers exist.
    * @param {Spreadsheet} ss
    * @returns {Sheet}
    */
@@ -23,73 +168,16 @@ var SheetWriter = (function () {
     if (!sheet) {
       sheet = ss.insertSheet(QA_SHEET_NAME);
     }
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 1) {
-      sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
-      sheet.getRange(1, 1, 1, HEADERS.length).setFontWeight('bold');
+    if (sheet.getLastRow() < 1) {
+      sheet.getRange(1, 1, 1, NUM_COLS).setValues([HEADERS]);
+      sheet.getRange(1, 1, 1, NUM_COLS).setFontWeight('bold');
       sheet.setFrozenRows(1);
     }
     return sheet;
   }
 
   /**
-   * Gets or creates the Config sheet and ensures key column headers.
-   * @param {Spreadsheet} ss
-   * @returns {Sheet}
-   */
-  function getOrCreateConfigSheet(ss) {
-    var sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
-    if (!sheet) {
-      sheet = ss.insertSheet(CONFIG_SHEET_NAME);
-      sheet.getRange(1, 1, 1, 2).setValues([['Key', 'Value']]);
-      sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
-      sheet.setFrozenRows(1);
-      sheet.appendRow([CONFIG_KEYS.teamId, '']);
-      sheet.appendRow([CONFIG_KEYS.botId, '']);
-      sheet.appendRow([CONFIG_KEYS.lastSyncedAt, '']);
-      sheet.appendRow([CONFIG_KEYS.lastRunAt, '']);
-    }
-    return sheet;
-  }
-
-  /**
-   * Reads a config value by key from the Config sheet.
-   * @param {Spreadsheet} ss
-   * @param {string} key
-   * @returns {string}
-   */
-  function getConfigValue(ss, key) {
-    var sheet = getOrCreateConfigSheet(ss);
-    var data = sheet.getDataRange().getValues();
-    for (var i = 1; i < data.length; i++) {
-      if (data[i][0] === key) {
-        return data[i][1] != null ? String(data[i][1]).trim() : '';
-      }
-    }
-    return '';
-  }
-
-  /**
-   * Writes a config value by key (upserts row).
-   * @param {Spreadsheet} ss
-   * @param {string} key
-   * @param {string} value
-   */
-  function setConfigValue(ss, key, value) {
-    var sheet = getOrCreateConfigSheet(ss);
-    var data = sheet.getDataRange().getValues();
-    for (var i = 1; i < data.length; i++) {
-      if (data[i][0] === key) {
-        sheet.getRange(i + 1, 2).setValue(value);
-        return;
-      }
-    }
-    sheet.appendRow([key, value]);
-  }
-
-  /**
-   * Returns the Question ID of the newest row in the Q&A Log (row 2 when sorted newest first).
-   * Used for fast "no new data" check. Returns empty string if sheet has no data rows.
+   * Returns the Question ID of the newest row (row 2 when sorted newest-first).
    * @param {Spreadsheet} ss
    * @returns {string}
    */
@@ -101,14 +189,18 @@ var SheetWriter = (function () {
   }
 
   /**
-   * Returns the set of existing Question IDs in the Q&A Log (for dedup).
+   * Returns a lookup object of all existing Question IDs for dedup.
+   * Single getValues call on the ID column.
    * @param {Spreadsheet} ss
    * @returns {Object.<string, boolean>}
    */
   function getExistingQuestionIds(ss) {
     var sheet = ss.getSheetByName(QA_SHEET_NAME);
-    if (!sheet || sheet.getLastRow() < 2) return {};
-    var ids = sheet.getRange(2, COL.QUESTION_ID + 1, sheet.getLastRow(), COL.QUESTION_ID + 1).getValues();
+    if (!sheet) return {};
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return {};
+    var numDataRows = lastRow - 1;
+    var ids = sheet.getRange(2, COL.QUESTION_ID + 1, numDataRows, 1).getValues();
     var out = {};
     for (var j = 0; j < ids.length; j++) {
       var id = ids[j][0];
@@ -117,53 +209,113 @@ var SheetWriter = (function () {
     return out;
   }
 
+  // ---------------------------------------------------------------------------
+  // Row building with explicit type safety
+  // ---------------------------------------------------------------------------
+
   /**
-   * Builds one row for the Q&A Log from a DocsBot question object (question/answer already scrubbed).
+   * Builds a single row array from a DocsBot question object.
+   * All values are explicitly typed to prevent Sheets auto-formatting issues:
+   *   - IDs → String (avoids scientific notation on long numeric IDs)
+   *   - Date → JS Date object (Sheets formats natively)
+   *   - Rating → Number or empty string
+   *   - Everything else → String
    * @param {Object} q - Raw question from API
    * @param {string} questionScrubbed
    * @param {string} answerScrubbed
    * @returns {Array}
    */
   function buildRow(q, questionScrubbed, answerScrubbed) {
-    var questionId = q.id || '';
-    var createdAt = q.createdAt || '';
+    var questionId = q.id != null ? String(q.id) : '';
     var couldAnswer = q.couldAnswer === true;
-    var rating = q.rating != null ? q.rating : '';
+    var rating = (q.rating != null && q.rating !== '') ? Number(q.rating) : '';
     var referrer = (q.metadata && q.metadata.referrer) ? String(q.metadata.referrer) : '';
     var sourcesStr = formatSources(q.sources);
-    return [
+
+    // Parse date as a JS Date so Sheets applies native date formatting
+    var dateValue = '';
+    if (q.createdAt) {
+      var d = new Date(q.createdAt);
+      if (!isNaN(d.getTime())) dateValue = d;
+    }
+
+    var row = [
       questionId,
-      formatDateTime(createdAt),
-      truncateForCell(questionScrubbed, 'Question', questionId),
-      truncateForCell(answerScrubbed, 'Bot Answer', questionId),
+      dateValue,
+      truncateForCell(String(questionScrubbed), 'Question', questionId),
+      truncateForCell(String(answerScrubbed), 'Bot Answer', questionId),
       couldAnswer ? 'YES' : 'NO',
-      truncateForCell(sourcesStr, 'Sources', questionId),
+      truncateForCell(String(sourcesStr), 'Sources', questionId),
       rating,
-      truncateForCell(referrer, 'Referrer', questionId),
+      truncateForCell(String(referrer), 'Referrer', questionId),
       'Pending Review',
-      '', // Action Needed - empty until reviewer chooses
+      '',
       '',
       ''
     ];
+
+    if (row.length !== NUM_COLS) {
+      Logger.log(
+        'COLUMN MISMATCH: buildRow produced %s columns but expected %s for questionId=%s',
+        row.length, NUM_COLS, questionId
+      );
+    }
+
+    return row;
   }
 
+  // ---------------------------------------------------------------------------
+  // Insert-at-top: keeps newest-first order without a post-write sort
+  // ---------------------------------------------------------------------------
+
   /**
-   * Appends rows to Q&A Log and applies dropdown validation to the new rows.
+   * Inserts rows at the top of the Q&A Log (directly after the header row)
+   * so the sheet stays in newest-first order without a full-range sort.
+   *
+   * Expects rows to already be in newest-first order (index 0 = newest).
+   *
+   * Guards:
+   *   - Skips if rows is empty.
+   *   - Throws if total cells would exceed Google's 10M cell limit.
+   *   - Validates column width of every row against HEADERS.length.
+   *
    * @param {Spreadsheet} ss
-   * @param {Array.<Array>} rows - Array of row arrays
+   * @param {Array.<Array>} rows - Newest-first order
    */
   function appendRows(ss, rows) {
     if (!rows || rows.length === 0) return;
-    var sheet = getOrCreateQALogSheet(ss);
-    var startRow = sheet.getLastRow() + 1;
+
     var numRows = rows.length;
-    var numCols = HEADERS.length;
 
-    // getRange(row, column, numRows, numColumns) — 3rd/4th args are counts, not end row/col
-    sheet.getRange(startRow, 1, numRows, numCols).setValues(rows);
+    var totalCells = numRows * NUM_COLS;
+    if (totalCells > MAX_CELLS_PER_WRITE) {
+      throw new Error(
+        'Batch too large: ' + totalCells + ' cells exceeds the ' +
+        MAX_CELLS_PER_WRITE + ' cell limit. Reduce the sync window or paginate writes.'
+      );
+    }
 
-    var reviewStatusCol = COL.REVIEW_STATUS + 1;
-    var actionNeededCol = COL.ACTION_NEEDED + 1;
+    for (var v = 0; v < numRows; v++) {
+      if (rows[v].length !== NUM_COLS) {
+        Logger.log(
+          'COLUMN MISMATCH on row index %s: got %s columns, expected %s. Row data: %s',
+          v, rows[v].length, NUM_COLS, JSON.stringify(rows[v]).substring(0, 200)
+        );
+        throw new Error(
+          'Column mismatch on row ' + v + ': got ' + rows[v].length +
+          ' columns but the sheet has ' + NUM_COLS + '. Aborting to prevent data corruption.'
+        );
+      }
+    }
+
+    var sheet = getOrCreateQALogSheet(ss);
+
+    sheet.insertRowsAfter(1, numRows);
+
+    var insertRange = sheet.getRange(2, 1, numRows, NUM_COLS);
+    insertRange.setValues(rows);
+    insertRange.setFontWeight('normal');
+    insertRange.setWrap(true);
 
     var reviewRule = SpreadsheetApp.newDataValidation()
       .requireValueInList(REVIEW_STATUS_VALUES, true)
@@ -172,33 +324,43 @@ var SheetWriter = (function () {
       .requireValueInList(ACTION_NEEDED_VALUES, true)
       .build();
 
-    sheet.getRange(startRow, reviewStatusCol, numRows, 1).setDataValidation(reviewRule);
-    sheet.getRange(startRow, actionNeededCol, numRows, 1).setDataValidation(actionRule);
-
-    sheet.getRange(startRow, 1, numRows, numCols).setWrap(true);
+    sheet.getRange(2, COL.REVIEW_STATUS + 1, numRows, 1).setDataValidation(reviewRule);
+    sheet.getRange(2, COL.ACTION_NEEDED + 1, numRows, 1).setDataValidation(actionRule);
   }
 
+  // ---------------------------------------------------------------------------
+  // Sort
+  // ---------------------------------------------------------------------------
+
   /**
-   * Sorts the Q&A Log data by Date/Time (column B) descending — newest first.
-   * Header row (row 1) is left in place; only data rows are sorted.
+   * Sorts all data rows by Date/Time (column B) descending.
+   * Header row is excluded from the sort range.
+   *
+   * No longer called by the sync flow (insert-at-top keeps order).
+   * Retained as a manual utility for one-off re-sorts if needed.
    * @param {Spreadsheet} ss
    */
   function sortQALogByNewestFirst(ss) {
     var sheet = ss.getSheetByName(QA_SHEET_NAME);
     if (!sheet) return;
     var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return;
-    var numCols = HEADERS.length;
-    var dataRange = sheet.getRange(2, 1, lastRow - 1, numCols);
-    var dateTimeCol = COL.DATE_TIME + 1; // 1-based column index (B = 2)
-    dataRange.sort({ column: dateTimeCol, ascending: false });
+    if (lastRow < 3) return; // need at least 2 data rows to sort
+    var dataRange = sheet.getRange(2, 1, lastRow - 1, NUM_COLS);
+    dataRange.sort({ column: COL.DATE_TIME + 1, ascending: false });
   }
 
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
+
   return {
-    getOrCreateQALogSheet: getOrCreateQALogSheet,
-    getOrCreateConfigSheet: getOrCreateConfigSheet,
+    loadConfigCache: loadConfigCache,
     getConfigValue: getConfigValue,
     setConfigValue: setConfigValue,
+    flushConfigCache: flushConfigCache,
+    resetConfigCache: resetConfigCache,
+    getOrCreateQALogSheet: getOrCreateQALogSheet,
+    getOrCreateConfigSheet: getOrCreateConfigSheet,
     getLatestQuestionId: getLatestQuestionId,
     getExistingQuestionIds: getExistingQuestionIds,
     buildRow: buildRow,

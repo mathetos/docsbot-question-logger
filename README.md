@@ -1,32 +1,31 @@
-# DocsBot Q&A Audit Log
+# 🤖 DocsBot Q&A Audit Log
 
-> Automatically sync your [DocsBot](https://docsbot.ai) Q&A history into a Google Sheet for team review, auditing, and continuous improvement of your bot's responses.
-
----
-
-## Overview
-
-When a chatbot answers customer questions, you need visibility into **what** it said, **whether** it was helpful, and **what to do next**. This project pulls every Q&A interaction from the DocsBot Admin API into a structured Google Sheet where your team can review and triage each response.
-
-**Built with** [Google Apps Script](https://developers.google.com/apps-script) and developed locally via [clasp](https://github.com/google/clasp).
+> Automatically sync your [DocsBot](https://docsbot.ai) Q&A history into a Google Sheet so your team can review every bot response, spot weak answers, and continuously improve your support.
 
 ---
 
-## Features
+## Why This Exists
 
-- **Incremental sync** -- Only fetches new questions since the last run. A fast-path check compares the latest API entry with the sheet before doing any heavy lifting.
-- **Manual or daily** -- Run "Sync Now" from the sheet menu anytime, or set a daily trigger to run automatically.
-- **Review workflow** -- Each row gets dropdown columns for **Review Status** and **Action Needed**, so the team can triage directly in the sheet.
-- **PII scrubbing** -- Emails, phone numbers, SSNs, credit card numbers, and IPv4 addresses are redacted before data reaches the sheet.
-- **Cell-safe** -- Values exceeding Google Sheets' 50,000-character limit are automatically truncated with a `[truncated]` marker and logged.
-- **Newest first** -- The log auto-sorts by date descending after every sync.
-- **Secure by default** -- API keys live in Apps Script Script Properties, never in source code. `.clasp.json` is git-ignored.
+When a chatbot answers customer questions, you need to know: **Did it answer correctly? Was something missing? Should we update our docs?**
+
+This tool pulls every Q&A interaction from DocsBot into a Google Sheet where your team can review each response and decide what action (if any) to take.
+
+---
+
+## What It Does
+
+- **Syncs automatically** — Runs once a day (or on-demand) and only fetches new questions. If nothing's new, it finishes in about a second.
+- **Newest first** — New entries always appear at the top of the sheet so the most recent interactions are front and center.
+- **Review workflow built in** — Each row has dropdown columns for **Review Status** and **Action Needed**, so your team can triage directly in the sheet.
+- **Protects personal data** — Emails, phone numbers, SSNs, credit card numbers, and IP addresses are automatically redacted before anything is written to the sheet.
+- **Handles large answers** — If a bot response exceeds Google Sheets' character limit, it's safely truncated with a `[truncated]` marker.
+- **Secure** — Your API key is stored in a protected area of Google Apps Script, never in the sheet itself or in source code.
 
 ---
 
 ## Action Categories
 
-Each synced Q&A entry can be triaged with one of these actions:
+When reviewing a Q&A entry, assign one of these actions:
 
 | Action | When to use |
 |--------|-------------|
@@ -37,181 +36,143 @@ Each synced Q&A entry can be triaged with one of these actions:
 
 ---
 
-## Prerequisites
+## Getting Started
 
-- **Node.js** (LTS recommended) -- for running `clasp` locally
-- **Google account** with access to Google Sheets
-- **DocsBot account** -- you'll need your API key (Bearer token), Team ID, and Bot ID
+### What you'll need
 
----
+- A **Google account** with access to Google Sheets
+- Your **DocsBot API key** (Bearer token), **Team ID**, and **Bot ID** — all found in your [DocsBot dashboard](https://docsbot.ai)
+- **Node.js** installed on your computer (for the one-time setup)
 
-## Quick Start
-
-### 1. Install dependencies
+### 1. Install and deploy
 
 ```bash
 cd docsbot-audit
 npm install
-```
-
-### 2. Authenticate with Google
-
-```bash
 npx clasp login
-```
-
-### 3. Create the Apps Script project
-
-**New project:**
-
-```bash
 npx clasp create --type sheets --title "DocsBot Q&A Audit Log"
 ```
 
-Then edit `.clasp.json` and set `"rootDir": "src"` so only the `src/` folder is pushed.
-
-**Existing project:**
-
-```bash
-npx clasp clone <scriptId>
-```
-
-Ensure `.clasp.json` has `"rootDir": "src"`.
-
-### 4. Push the code
+Edit `.clasp.json` and set `"rootDir": "src"`, then push the code:
 
 ```bash
 npx clasp push
 ```
 
-### 5. Open the sheet
+### 2. Open the sheet
 
 ```bash
 npx clasp open
 ```
 
+### 3. Enter your credentials
+
+From the sheet's menu bar, go to **🤖 DocsBot Audit**:
+
+1. **Setup API Key** — paste your DocsBot API Bearer token
+2. **Setup Team ID & Bot ID** — enter both values (found in your DocsBot dashboard URL)
+
+### 4. Run your first sync
+
+Go to **🤖 DocsBot Audit > Sync Now**. The first run fetches your full Q&A history and may take a moment. After that, syncs only pull in new entries and are much faster.
+
+### 5. Set up daily sync (optional)
+
+To have the sheet update automatically every morning, open the Apps Script editor (Extensions > Apps Script), select `createDailyTrigger` from the function dropdown, and run it once. The default is 6 AM in your script's timezone.
+
 ---
 
-## Sheet Setup
+## How the Sheet Works
+
+### Columns
+
+| Column | What it shows |
+|--------|---------------|
+| **Question ID** | Internal DocsBot ID (used to avoid duplicates — don't delete this column). |
+| **Date/Time** | When the question was asked. |
+| **Question** | What the user asked (personal info redacted). |
+| **Bot Answer** | What the bot replied (personal info redacted). |
+| **Could Answer?** | `YES` or `NO` — whether DocsBot was able to answer. |
+| **Sources** | Documentation pages the bot cited. |
+| **User Rating** | Rating from the user, if they left one. |
+| **Referrer** | The page the user was on when they asked. |
+| **Review Status** | Dropdown: `Pending Review` or `Reviewed`. |
+| **Action Needed** | Dropdown: see [Action Categories](#action-categories) above. |
+| **Reviewer Notes** | Free text — add any context or follow-up notes. |
+| **Reviewer** | Name of the person who reviewed this entry. |
 
 ### Config sheet
 
-The script auto-creates a **Config** sheet if one doesn't exist. Fill in the required values:
-
-| Key | Value |
-|-----|-------|
-| `teamId` | Your DocsBot Team ID (from the dashboard URL) |
-| `botId` | Your DocsBot Bot ID (from the dashboard URL) |
-
-### API key
-
-From the sheet menu: **DocsBot Audit > Setup API Key**
-
-Enter your DocsBot API Bearer token. It's stored in Apps Script **Script Properties** -- never in the sheet or source code.
-
-### First sync
-
-Use **DocsBot Audit > Sync Now**. The first run fetches all existing questions and may take a moment.
-
-### Daily sync (optional)
-
-In the Apps Script editor, select `createDailyTrigger` from the function dropdown and run it once. This installs a daily trigger (default: 6 AM in the script's timezone). Change the hour in `Config.js` via `DAILY_TRIGGER_HOUR`.
+The script creates a **Config** sheet automatically. It stores your Team ID, Bot ID, and sync timestamps. You generally don't need to touch it after initial setup.
 
 ---
 
-## Development
+## Privacy & Data Protection
 
-```bash
-# Edit files in src/, then deploy
-npx clasp push
+| What | How it's handled |
+|------|-----------------|
+| **API key** | Stored in Apps Script's protected Script Properties. Never in the sheet or code. |
+| **Personal info in questions** | Automatically redacted before writing to the sheet (see below). |
+| **Sheet access** | Standard Google Sheets sharing controls. Restrict to your review team. |
 
-# Open the sheet or script editor
-npx clasp open
+### What gets redacted
 
-# View logs
-npx clasp logs
-```
+The script scans every question and answer for these patterns and replaces them with placeholder tags:
 
----
+| Pattern | Replaced with |
+|---------|---------------|
+| Email addresses | `[EMAIL_REDACTED]` |
+| Phone numbers | `[PHONE_REDACTED]` |
+| Social Security Numbers | `[SSN_REDACTED]` |
+| Credit card numbers | `[CC_REDACTED]` |
+| IP addresses | `[IP_REDACTED]` |
 
-## Project Structure
-
-```
-docsbot-audit/
-  .clasp.json            # clasp config (git-ignored)
-  .claspignore           # files excluded from push
-  .gitignore
-  .env.example           # documents required config values
-  package.json
-  README.md
-  src/
-    appsscript.json      # Apps Script manifest (scopes, timezone)
-    Config.js            # IDs, sheet names, column layout, constants
-    Main.js              # onOpen menu, sync orchestration, triggers
-    DocsBotApi.js        # API client with pagination and fast-path check
-    SheetWriter.js       # Row appending, dropdowns, sorting, config I/O
-    PiiScrubber.js       # Regex-based PII redaction
-    Utils.js             # Date formatting, source formatting, truncation
-    SyncModal.html       # Progress modal (not active; reserved for future use)
-```
-
----
-
-## Sheet Columns
-
-| Column | Description |
-|--------|-------------|
-| **Question ID** | DocsBot question ID (used for deduplication). |
-| **Date/Time** | When the question was asked (local time). |
-| **Question** | User's question (PII-scrubbed). |
-| **Bot Answer** | Bot's response (PII-scrubbed). |
-| **Could Answer?** | `YES` or `NO` -- whether DocsBot could answer. |
-| **Sources** | Titles and URLs the bot cited (newline-separated). |
-| **User Rating** | Rating value if the user provided one. |
-| **Referrer** | Page the user came from (`metadata.referrer`). |
-| **Review Status** | Dropdown: `Pending Review` / `Reviewed`. |
-| **Action Needed** | Dropdown: see [Action Categories](#action-categories) above. |
-| **Reviewer Notes** | Free text for team commentary. |
-| **Reviewer** | Name of the person who reviewed. |
-
----
-
-## Security
-
-| Concern | How it's handled |
-|---------|-----------------|
-| **API key** | Stored in Apps Script **Script Properties** via the sheet menu. Never committed to source. |
-| **Team/Bot IDs** | Set in the Config sheet at runtime, or as empty defaults in `Config.js`. |
-| **Sheet access** | Standard Google Sheets sharing. Restrict to your review team. |
-| **`.clasp.json`** | Contains the script ID. Git-ignored by default. |
-
----
-
-## PII Scrubbing
-
-Before writing to the sheet, the script redacts these patterns from **Question** and **Bot Answer** text:
-
-| Pattern | Replacement |
-|---------|-------------|
-| Email addresses | `[PII-EMAIL]` |
-| Phone numbers (US/international) | `[PII-PHONE]` |
-| SSN (`xxx-xx-xxxx`) | `[PII-SSN]` |
-| Credit card numbers (16 digits) | `[PII-CC]` |
-| IPv4 addresses | `[PII-IP]` |
-
-> **Limitation:** Detection is regex-based. It does not catch names, physical addresses, or other unstructured PII. For stricter compliance, consider additional tooling or manual review.
+> **Note:** This catches common structured patterns. It won't catch names, physical addresses, or other freeform personal info. If you need stricter compliance, consider additional review processes.
 
 ---
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| **"API key not set"** | Run **DocsBot Audit > Setup API Key** and enter your Bearer token. |
-| **"Team ID and Bot ID must be set"** | Add `teamId` and `botId` rows in the **Config** sheet. |
-| **Sync fails with 401** | Verify the API key is correct and has access to the team/bot. |
-| **Duplicate rows** | The script deduplicates by Question ID and last-synced timestamp. Don't delete the Question ID column. |
-| **50,000 character cell limit** | The script auto-truncates with `[truncated]`. Check **View > Executions** in the script editor for details on which fields were truncated. |
+| Problem | What to do |
+|---------|------------|
+| **"API key not set"** | Go to **🤖 DocsBot Audit > Setup API Key** and paste your token. |
+| **"Team ID and Bot ID must be set"** | Go to **🤖 DocsBot Audit > Setup Team ID & Bot ID** and enter both values. |
+| **Sync fails with 401 error** | Double-check that your API key is correct and has access to the team/bot. |
+| **Seeing duplicate rows** | The script deduplicates by Question ID. Make sure the Question ID column hasn't been deleted or modified. |
+| **A cell shows `[truncated]`** | The original content exceeded 50,000 characters. The full version is in the DocsBot dashboard. |
+| **Sync stopped early** | The script has a 5-minute safety limit. Just run Sync Now again to continue where it left off. |
+
+---
+
+## For Developers
+
+<details>
+<summary>Project structure and dev commands</summary>
+
+```
+docsbot-audit/
+  .clasp.json            # clasp config (git-ignored)
+  .claspignore           # files excluded from push
+  package.json
+  README.md
+  src/
+    appsscript.json      # Apps Script manifest (scopes, timezone)
+    Config.js            # IDs, sheet names, column layout, constants
+    Main.js              # Menu, sync orchestration, triggers
+    DocsBotApi.js        # API client — descending fetch, early-exit, retry
+    SheetWriter.js       # Insert-at-top writes, dropdowns, config cache
+    PiiScrubber.js       # Single-pass regex PII redaction
+    Utils.js             # Date formatting, source formatting, truncation
+    SyncModal.html       # Progress modal (reserved for future use)
+```
+
+```bash
+npx clasp push      # deploy changes
+npx clasp open      # open the sheet or script editor
+npx clasp logs      # view execution logs
+```
+
+</details>
 
 ---
 

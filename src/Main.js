@@ -9,9 +9,11 @@
 function onOpen() {
   'use strict';
   var ui = SpreadsheetApp.getUi();
-  ui.createMenu('DocsBot Audit')
+  ui.createMenu('🤖 DocsBot Audit')
     .addItem('Sync Now', 'menuSyncNow')
+    .addSeparator()
     .addItem('Setup API Key', 'menuSetupApiKey')
+    .addItem('Setup Team ID & Bot ID', 'menuSetupIds')
     .addToUi();
 }
 
@@ -23,9 +25,15 @@ function menuSyncNow() {
   var ui = SpreadsheetApp.getUi();
   try {
     var result = syncQuestions();
-    var msg = result.added === 0
-      ? 'No new questions. Your log is up to date.'
-      : 'Added ' + result.added + ' new question' + (result.added === 1 ? '' : 's') + ' to the Q&A log.';
+    var msg;
+    if (result.added === 0) {
+      msg = 'No new questions. Your log is up to date.';
+    } else {
+      msg = 'Added ' + result.added + ' new question' + (result.added === 1 ? '' : 's') + ' to the Q&A log.';
+    }
+    if (result.timedOut) {
+      msg += '\n\nNote: Sync stopped early due to time limit. Run Sync Now again to continue.';
+    }
     ui.alert('Sync complete', msg, ui.ButtonSet.OK);
   } catch (e) {
     ui.alert('Sync failed', e.message || String(e), ui.ButtonSet.OK);
@@ -60,51 +68,117 @@ function setupApiKey(apiKey) {
 }
 
 /**
+ * Menu action: prompt for Team ID and Bot ID and save to the Config sheet.
+ */
+function menuSetupIds() {
+  'use strict';
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var keys = Config.getConfigKeys();
+
+  var currentTeamId = SheetWriter.getConfigValue(ss, keys.teamId);
+  var currentBotId = SheetWriter.getConfigValue(ss, keys.botId);
+
+  var teamResponse = ui.prompt(
+    'DocsBot Team ID',
+    'Enter your DocsBot Team ID (from the dashboard URL).' + (currentTeamId ? '\n\nCurrent: ' + currentTeamId : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (teamResponse.getSelectedButton() !== ui.Button.OK) return;
+  var teamId = (teamResponse.getResponseText() || '').trim();
+  if (!teamId) {
+    ui.alert('No Team ID entered.');
+    return;
+  }
+
+  var botResponse = ui.prompt(
+    'DocsBot Bot ID',
+    'Enter your DocsBot Bot ID (from the dashboard URL).' + (currentBotId ? '\n\nCurrent: ' + currentBotId : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (botResponse.getSelectedButton() !== ui.Button.OK) return;
+  var botId = (botResponse.getResponseText() || '').trim();
+  if (!botId) {
+    ui.alert('No Bot ID entered.');
+    return;
+  }
+
+  SheetWriter.loadConfigCache(ss);
+  SheetWriter.setConfigValue(ss, keys.teamId, teamId);
+  SheetWriter.setConfigValue(ss, keys.botId, botId);
+  SheetWriter.flushConfigCache(ss);
+  SheetWriter.resetConfigCache();
+  ui.alert('Configuration saved', 'Team ID and Bot ID have been saved to the Config sheet.', ui.ButtonSet.OK);
+}
+
+/**
  * Syncs DocsBot Q&A history to the Q&A Log sheet.
- * Reads teamId/botId from Config sheet (or Config defaults), lastSyncedAt from Config sheet.
- * Fetches questions, scrubs PII, appends new rows, updates lastSyncedAt and lastRunAt.
- * @returns {{ added: number }}
+ *
+ * Pipeline:
+ *   1. Fast-path check (1 API call) — if the latest IDs match, return immediately.
+ *   2. Descending fetch — newest-first pages, stops as soon as a known ID is hit.
+ *   3. PII scrubbed at the API layer before data reaches this function.
+ *   4. Insert-at-top — new rows go directly after the header, no sort needed.
+ *   5. Watermark updated only after successful write (idempotent).
+ *
+ * @returns {{ added: number, timedOut: boolean }}
  */
 function syncQuestions() {
   'use strict';
 
+  var startMs = Date.now();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var apiKey = PropertiesService.getScriptProperties().getProperty(Config.getApiKeyPropertyName());
   if (!apiKey) {
     throw new Error('API key not set. Use DocsBot Audit > Setup API Key.');
   }
 
-  var teamId = SheetWriter.getConfigValue(ss, Config.getConfigKeys().teamId) || Config.getTeamId();
-  var botId = SheetWriter.getConfigValue(ss, Config.getConfigKeys().botId) || Config.getBotId();
+  SheetWriter.loadConfigCache(ss);
+
+  var keys = Config.getConfigKeys();
+  var teamId = SheetWriter.getConfigValue(ss, keys.teamId) || Config.getTeamId();
+  var botId = SheetWriter.getConfigValue(ss, keys.botId) || Config.getBotId();
   if (!teamId || !botId) {
     throw new Error('Team ID and Bot ID must be set in the Config sheet (Key: teamId, botId) or in Config.js.');
   }
 
-  // Fast path: if sheet already has data, compare newest ID from API with newest in sheet
+  // ---- Fast path ----
   var sheetLatestId = SheetWriter.getLatestQuestionId(ss);
+  Logger.log('[sync] Sheet latest ID: %s', sheetLatestId || '(empty)');
+
   if (sheetLatestId) {
     var apiLatest = fetchLatestQuestion(apiKey, teamId, botId);
+    Logger.log('[sync] API latest ID: %s', apiLatest ? apiLatest.id : '(null)');
     if (apiLatest && apiLatest.id && apiLatest.id === sheetLatestId) {
+      Logger.log('[sync] Fast path: IDs match, nothing to do (%sms)', Date.now() - startMs);
       return { added: 0 };
     }
+    Logger.log('[sync] Fast path: IDs differ, proceeding to fetch');
   }
 
-  var lastSyncedAt = SheetWriter.getConfigValue(ss, Config.getConfigKeys().lastSyncedAt);
-  var sinceIso = lastSyncedAt || null;
-
+  // ---- Fetch from API (descending, early-exit on known ID) ----
   var existingIds = SheetWriter.getExistingQuestionIds(ss);
-  var questions = fetchAllQuestions(apiKey, teamId, botId, sinceIso);
+  Logger.log('[sync] Existing IDs in sheet: %s', Object.keys(existingIds).length);
 
+  var fetchResult = fetchAllQuestions(apiKey, teamId, botId, existingIds, startMs);
+  var questions = fetchResult.questions;
+  var timedOut = fetchResult.timedOut;
+
+  Logger.log('[sync] API returned %s new question(s), timedOut=%s', questions.length, timedOut);
+
+  // ---- Build rows (safety-net dedup; API layer already filters known IDs) ----
   var rows = [];
+  var skippedDupes = 0;
   var latestCreatedAt = null;
 
   for (var i = 0; i < questions.length; i++) {
     var q = questions[i];
-    if (existingIds[q.id]) continue;
+    if (existingIds[q.id]) {
+      skippedDupes++;
+      continue;
+    }
 
-    var questionScrubbed = PiiScrubber.scrub(q.question || '');
-    var answerScrubbed = PiiScrubber.scrub(q.answer || '');
-    rows.push(SheetWriter.buildRow(q, questionScrubbed, answerScrubbed));
+    rows.push(SheetWriter.buildRow(q, q.question || '', q.answer || ''));
 
     var t = q.createdAt ? new Date(q.createdAt).getTime() : 0;
     if (t && (latestCreatedAt === null || t > latestCreatedAt)) {
@@ -112,16 +186,28 @@ function syncQuestions() {
     }
   }
 
-  SheetWriter.appendRows(ss, rows);
-  SheetWriter.sortQALogByNewestFirst(ss);
+  Logger.log('[sync] New rows to write: %s, safety-net dupes skipped: %s', rows.length, skippedDupes);
 
-  var now = new Date().toISOString();
-  SheetWriter.setConfigValue(ss, Config.getConfigKeys().lastRunAt, now);
+  // ---- Write to sheet (insert-at-top keeps newest-first, no sort needed) ----
+  SheetWriter.appendRows(ss, rows);
+  Logger.log('[sync] Sheet write complete');
+
+  // ---- Update watermark only after successful write ----
+  SheetWriter.setConfigValue(ss, keys.lastRunAt, new Date().toISOString());
   if (latestCreatedAt) {
-    SheetWriter.setConfigValue(ss, Config.getConfigKeys().lastSyncedAt, latestCreatedAt);
+    SheetWriter.setConfigValue(ss, keys.lastSyncedAt, latestCreatedAt);
+    Logger.log('[sync] Advancing lastSyncedAt to %s', latestCreatedAt);
+  }
+  SheetWriter.flushConfigCache(ss);
+
+  var elapsedMs = Date.now() - startMs;
+  Logger.log('[sync] Complete: added %s row(s) in %sms', rows.length, elapsedMs);
+
+  if (timedOut) {
+    Logger.log('[sync] NOTE: Fetch was cut short by time budget. Run sync again to pick up remaining questions.');
   }
 
-  return { added: rows.length };
+  return { added: rows.length, timedOut: timedOut };
 }
 
 /**

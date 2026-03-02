@@ -59,12 +59,22 @@ var Config = (function () {
   var CONFIG_BOT_ID = 'botId';
 
   var DOCSBOT_API_BASE = 'https://docsbot.ai/api';
-  var PER_PAGE = 50;
+  var PER_PAGE = 100;
 
   var DAILY_TRIGGER_HOUR = 6; // 6 AM in script timezone
 
   // Google Sheets cell limit is 50,000 characters; stay under to allow " [truncated]" suffix
   var MAX_CELL_CHARS = 49900;
+
+  // API retry: exponential backoff for 429 / 5xx
+  var MAX_RETRIES = 3;
+  var RETRY_BASE_MS = 1000; // 1s, 2s, 4s
+
+  // GAS has a 6-minute hard limit; stop fetching at 5 minutes to leave time for flush
+  var SYNC_TIME_BUDGET_MS = 300000;
+
+  // PII: truncate input before regex to avoid catastrophic backtracking on huge strings
+  var PII_SCRUB_MAX_LENGTH = 15000;
 
   return {
     getTeamId: function () { return TEAM_ID; },
@@ -89,6 +99,10 @@ var Config = (function () {
     getDocsBotApiBase: function () { return DOCSBOT_API_BASE; },
     getPerPage: function () { return PER_PAGE; },
     getDailyTriggerHour: function () { return DAILY_TRIGGER_HOUR; },
-    getMaxCellChars: function () { return MAX_CELL_CHARS; }
+    getMaxCellChars: function () { return MAX_CELL_CHARS; },
+    getMaxRetries: function () { return MAX_RETRIES; },
+    getRetryBaseMs: function () { return RETRY_BASE_MS; },
+    getSyncTimeBudgetMs: function () { return SYNC_TIME_BUDGET_MS; },
+    getPiiScrubMaxLength: function () { return PII_SCRUB_MAX_LENGTH; }
   };
 })();
