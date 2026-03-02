@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f8fafc;
+      min-height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      padding: 32px 28px;
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+    }
+    .progress-section {
+      display: block;
+    }
+    .result-section, .error-section {
+      display: none;
+    }
+    .result-section.visible, .error-section.visible {
+      display: block;
+      animation: fadeIn 0.35s ease;
+    }
+    .progress-section.hidden {
+      display: none;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .spinner {
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 20px;
+      border: 3px solid #e2e8f0;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .progress-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: #1e293b;
+      margin: 0 0 6px;
+    }
+    .progress-sub {
+      font-size: 13px;
+      color: #64748b;
+      margin: 0;
+    }
+    .icon-wrap {
+      width: 52px;
+      height: 52px;
+      margin: 0 auto 16px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 26px;
+    }
+    .icon-wrap.success {
+      background: #dcfce7;
+      color: #16a34a;
+    }
+    .icon-wrap.error {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+    .result-title, .error-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: #1e293b;
+      margin: 0 0 8px;
+    }
+    .result-message, .error-message {
+      font-size: 14px;
+      color: #64748b;
+      margin: 0 0 20px;
+      line-height: 1.45;
+    }
+    .error-message {
+      color: #991b1b;
+      background: #fef2f2;
+      padding: 12px;
+      border-radius: 8px;
+      text-align: left;
+      word-break: break-word;
+    }
+    .btn {
+      display: inline-block;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-close {
+      background: #3b82f6;
+      color: #fff;
+    }
+    .btn-close:hover {
+      background: #2563eb;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div id="progressSection" class="progress-section">
+      <div class="spinner" aria-hidden="true"></div>
+      <h2 class="progress-title">Syncing</h2>
+      <p class="progress-sub">Checking DocsBot and updating your Q&A log…</p>
+    </div>
+
+    <div id="resultSection" class="result-section">
+      <div class="icon-wrap success" aria-hidden="true">✓</div>
+      <h2 class="result-title">Sync complete</h2>
+      <p id="resultMessage" class="result-message"></p>
+      <button type="button" class="btn btn-close" id="closeBtn">Close</button>
+    </div>
+
+    <div id="errorSection" class="error-section">
+      <div class="icon-wrap error" aria-hidden="true">✕</div>
+      <h2 class="error-title">Sync failed</h2>
+      <p id="errorMessage" class="error-message"></p>
+      <button type="button" class="btn btn-close" id="errorCloseBtn">Close</button>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      var progressSection = document.getElementById('progressSection');
+      var resultSection = document.getElementById('resultSection');
+      var errorSection = document.getElementById('errorSection');
+      var resultMessage = document.getElementById('resultMessage');
+      var errorMessage = document.getElementById('errorMessage');
+
+      function showResult(added) {
+        progressSection.classList.add('hidden');
+        resultSection.classList.add('visible');
+        resultMessage.textContent = added === 0
+          ? 'No new questions. Your log is up to date.'
+          : 'Added ' + added + ' new question' + (added === 1 ? '' : 's') + ' to the Q&A log.';
+      }
+
+      function showError(msg) {
+        progressSection.classList.add('hidden');
+        errorSection.classList.add('visible');
+        errorMessage.textContent = msg || 'An unexpected error occurred.';
+      }
+
+      function closeDialog() {
+        if (typeof google !== 'undefined' && google.script && google.script.host && google.script.host.close) {
+          google.script.host.close();
+        }
+      }
+
+      document.getElementById('closeBtn').addEventListener('click', closeDialog);
+      document.getElementById('errorCloseBtn').addEventListener('click', closeDialog);
+
+      google.script.run
+        .withSuccessHandler(showResult)
+        .withFailureHandler(showError)
+        .syncQuestions();
+    })();
+  </script>
+</body>
+</html>
