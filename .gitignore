@@ -1,4 +1,5 @@
 node_modules/
-.clasp.json
+.clasp*.json
+!.clasp.json.example
 .env
 *.log

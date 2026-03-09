@@ -15,6 +15,7 @@ var SheetWriter = (function () {
   var HEADERS = Config.getHeadersQALog();
   var NUM_COLS = HEADERS.length;
   var REVIEW_STATUS_VALUES = Config.getReviewStatusValues();
+  var SAFE_TO_SEND_VALUES = Config.getSafeToSendValues();
   var ACTION_NEEDED_VALUES = Config.getActionNeededValues();
   var CONFIG_KEYS = Config.getConfigKeys();
   var QA_SHEET_NAME = Config.getSheetQALogName();
@@ -168,11 +169,145 @@ var SheetWriter = (function () {
     if (!sheet) {
       sheet = ss.insertSheet(QA_SHEET_NAME);
     }
-    if (sheet.getLastRow() < 1) {
+
+    // Ensure headers exist and match the expected schema.
+    // Supports one-time migrations when columns are added.
+    var lastRow = sheet.getLastRow();
+    var lastCol = sheet.getLastColumn();
+
+    if (lastRow < 1) {
       sheet.getRange(1, 1, 1, NUM_COLS).setValues([HEADERS]);
       sheet.getRange(1, 1, 1, NUM_COLS).setFontWeight('bold');
       sheet.setFrozenRows(1);
+      return sheet;
     }
+
+    var existingHeaders = [];
+    if (lastCol > 0) {
+      existingHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (v) {
+        return v != null ? String(v).trim() : '';
+      });
+    }
+
+    function arraysEqual(a, b) {
+      if (a.length !== b.length) return false;
+      for (var i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+      }
+      return true;
+    }
+
+    // If it's already correct, do nothing.
+    if (existingHeaders.length >= HEADERS.length &&
+      arraysEqual(existingHeaders.slice(0, HEADERS.length), HEADERS)) {
+      return sheet;
+    }
+
+    // Migration: if this looks like our managed sheet, rewrite data into the
+    // expected schema so column re-ordering and additions don't corrupt data.
+    var headerStr = existingHeaders.join('|');
+    var looksManaged =
+      headerStr.indexOf('Question ID') !== -1 &&
+      headerStr.indexOf('Bot Answer') !== -1 &&
+      headerStr.indexOf('Review Status') !== -1;
+
+    if (looksManaged && lastRow >= 1 && lastCol >= 1) {
+      var data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+      var oldHeaders = data[0].map(function (v) {
+        return v != null ? String(v).trim() : '';
+      });
+
+      var idx = {};
+      for (var c = 0; c < oldHeaders.length; c++) {
+        if (oldHeaders[c]) idx[oldHeaders[c]] = c;
+      }
+
+      function getVal(row, headerName) {
+        var i = idx[headerName];
+        if (i === undefined) return '';
+        return row[i];
+      }
+
+      function looksLikeHelpScoutUrl(v) {
+        if (!v) return false;
+        var s = String(v);
+        return s.indexOf('helpscout') !== -1;
+      }
+
+      var newData = [HEADERS.slice()];
+      for (var r = 1; r < data.length; r++) {
+        var oldRow = data[r];
+        var newRow = new Array(NUM_COLS);
+        for (var z = 0; z < NUM_COLS; z++) newRow[z] = '';
+
+        // Date (old "Date/Time" or "Date")
+        newRow[COL.DATE] = getVal(oldRow, 'Date') || getVal(oldRow, 'Date/Time');
+
+        // HelpScout URL (may have been stored in legacy "Referrer")
+        var hs = getVal(oldRow, 'HelpScout URL');
+        if (!hs) {
+          var ref = getVal(oldRow, 'Referrer');
+          if (looksLikeHelpScoutUrl(ref)) hs = ref;
+        }
+        newRow[COL.HELPSCOUT_URL] = hs || '';
+
+        newRow[COL.QUESTION_ID] = getVal(oldRow, 'Question ID');
+        newRow[COL.QUESTION] = getVal(oldRow, 'Question');
+        newRow[COL.ANSWER] = getVal(oldRow, 'Bot Answer');
+        newRow[COL.COULD_ANSWER] = getVal(oldRow, 'Could Answer?');
+        newRow[COL.SOURCES] = getVal(oldRow, 'Sources');
+
+        newRow[COL.REVIEW_STATUS] = getVal(oldRow, 'Review Status') || 'Pending Review';
+        newRow[COL.SAFE_TO_SEND] = getVal(oldRow, 'Safe to Send') || '';
+        newRow[COL.ACTION_NEEDED] = getVal(oldRow, 'Action Needed') || '';
+        newRow[COL.REVIEWER_NOTES] = getVal(oldRow, 'Reviewer Notes') || '';
+        newRow[COL.REVIEWER] = getVal(oldRow, 'Reviewer') || '';
+
+        newData.push(newRow);
+      }
+
+      // Ensure the sheet has enough rows/cols for the rewrite.
+      if (sheet.getMaxColumns() < NUM_COLS) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), NUM_COLS - sheet.getMaxColumns());
+      }
+      if (sheet.getMaxRows() < newData.length) {
+        sheet.insertRowsAfter(sheet.getMaxRows(), newData.length - sheet.getMaxRows());
+      }
+
+      sheet.getRange(1, 1, newData.length, NUM_COLS).setValues(newData);
+      sheet.getRange(1, 1, 1, NUM_COLS).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+
+      // Trim any extra columns to the right.
+      if (sheet.getLastColumn() > NUM_COLS) {
+        sheet.deleteColumns(NUM_COLS + 1, sheet.getLastColumn() - NUM_COLS);
+      }
+
+      // Apply dropdown validations across existing data rows.
+      if (newData.length >= 2) {
+        var rowsToValidate = newData.length - 1;
+        var reviewRule = SpreadsheetApp.newDataValidation()
+          .requireValueInList(REVIEW_STATUS_VALUES, true)
+          .build();
+        var safeRule = SpreadsheetApp.newDataValidation()
+          .requireValueInList(SAFE_TO_SEND_VALUES, true)
+          .build();
+        var actionRule = SpreadsheetApp.newDataValidation()
+          .requireValueInList(ACTION_NEEDED_VALUES, true)
+          .build();
+
+        sheet.getRange(2, COL.REVIEW_STATUS + 1, rowsToValidate, 1).setDataValidation(reviewRule);
+        sheet.getRange(2, COL.SAFE_TO_SEND + 1, rowsToValidate, 1).setDataValidation(safeRule);
+        sheet.getRange(2, COL.ACTION_NEEDED + 1, rowsToValidate, 1).setDataValidation(actionRule);
+      }
+
+      return sheet;
+    }
+
+    // Fallback: enforce expected header row without attempting reordering.
+    sheet.getRange(1, 1, 1, NUM_COLS).setValues([HEADERS]);
+    sheet.getRange(1, 1, 1, NUM_COLS).setFontWeight('bold');
+    sheet.setFrozenRows(1);
     return sheet;
   }
 
@@ -218,7 +353,6 @@ var SheetWriter = (function () {
    * All values are explicitly typed to prevent Sheets auto-formatting issues:
    *   - IDs → String (avoids scientific notation on long numeric IDs)
    *   - Date → JS Date object (Sheets formats natively)
-   *   - Rating → Number or empty string
    *   - Everything else → String
    * @param {Object} q - Raw question from API
    * @param {string} questionScrubbed
@@ -228,9 +362,8 @@ var SheetWriter = (function () {
   function buildRow(q, questionScrubbed, answerScrubbed) {
     var questionId = q.id != null ? String(q.id) : '';
     var couldAnswer = q.couldAnswer === true;
-    var rating = (q.rating != null && q.rating !== '') ? Number(q.rating) : '';
-    var referrer = (q.metadata && q.metadata.referrer) ? String(q.metadata.referrer) : '';
     var sourcesStr = formatSources(q.sources);
+    var helpScoutUrl = extractHelpScoutUrl(q.metadata);
 
     // Parse date as a JS Date so Sheets applies native date formatting
     var dateValue = '';
@@ -240,15 +373,15 @@ var SheetWriter = (function () {
     }
 
     var row = [
-      questionId,
       dateValue,
+      helpScoutUrl,
+      questionId,
       truncateForCell(String(questionScrubbed), 'Question', questionId),
       truncateForCell(String(answerScrubbed), 'Bot Answer', questionId),
       couldAnswer ? 'YES' : 'NO',
       truncateForCell(String(sourcesStr), 'Sources', questionId),
-      rating,
-      truncateForCell(String(referrer), 'Referrer', questionId),
       'Pending Review',
+      '',
       '',
       '',
       ''
@@ -262,6 +395,48 @@ var SheetWriter = (function () {
     }
 
     return row;
+  }
+
+  /**
+   * Best-effort extraction of a HelpScout URL from DocsBot question metadata.
+   * DocsBot integrations commonly place third-party context on the `metadata`
+   * object, but field names can vary; we search both common keys and values.
+   *
+   * @param {Object|null} metadata
+   * @returns {string}
+   */
+  function extractHelpScoutUrl(metadata) {
+    if (!metadata || typeof metadata !== 'object') return '';
+
+    function isHelpScoutUrl(v) {
+      if (!v) return false;
+      var s = String(v);
+      return s.indexOf('helpscout') !== -1;
+    }
+
+    var candidates = [
+      metadata.helpscoutUrl,
+      metadata.helpscout_url,
+      metadata.helpScoutUrl,
+      metadata.help_scout_url,
+      metadata.conversationUrl,
+      metadata.conversation_url,
+      metadata.url,
+      metadata.referrer
+    ];
+
+    for (var i = 0; i < candidates.length; i++) {
+      if (isHelpScoutUrl(candidates[i])) return String(candidates[i]);
+    }
+
+    // Last resort: scan metadata values for a HelpScout URL.
+    var keys = Object.keys(metadata);
+    for (var k = 0; k < keys.length; k++) {
+      var val = metadata[keys[k]];
+      if (isHelpScoutUrl(val)) return String(val);
+    }
+
+    return '';
   }
 
   // ---------------------------------------------------------------------------
@@ -320,11 +495,15 @@ var SheetWriter = (function () {
     var reviewRule = SpreadsheetApp.newDataValidation()
       .requireValueInList(REVIEW_STATUS_VALUES, true)
       .build();
+    var safeRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(SAFE_TO_SEND_VALUES, true)
+      .build();
     var actionRule = SpreadsheetApp.newDataValidation()
       .requireValueInList(ACTION_NEEDED_VALUES, true)
       .build();
 
     sheet.getRange(2, COL.REVIEW_STATUS + 1, numRows, 1).setDataValidation(reviewRule);
+    sheet.getRange(2, COL.SAFE_TO_SEND + 1, numRows, 1).setDataValidation(safeRule);
     sheet.getRange(2, COL.ACTION_NEEDED + 1, numRows, 1).setDataValidation(actionRule);
   }
 
@@ -346,7 +525,7 @@ var SheetWriter = (function () {
     var lastRow = sheet.getLastRow();
     if (lastRow < 3) return; // need at least 2 data rows to sort
     var dataRange = sheet.getRange(2, 1, lastRow - 1, NUM_COLS);
-    dataRange.sort({ column: COL.DATE_TIME + 1, ascending: false });
+    dataRange.sort({ column: COL.DATE + 1, ascending: false });
   }
 
   // ---------------------------------------------------------------------------

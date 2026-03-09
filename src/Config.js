@@ -15,36 +15,37 @@ var Config = (function () {
   var PROPERTY_API_KEY = 'DOCSBOT_API_KEY';
 
   var COL = {
-    QUESTION_ID: 0,      // A
-    DATE_TIME: 1,        // B
-    QUESTION: 2,         // C
-    ANSWER: 3,           // D
-    COULD_ANSWER: 4,     // E
-    SOURCES: 5,          // F
-    USER_RATING: 6,      // G
-    REFERRER: 7,         // H
-    REVIEW_STATUS: 8,    // I
+    DATE: 0,             // A
+    HELPSCOUT_URL: 1,    // B
+    QUESTION_ID: 2,      // C
+    QUESTION: 3,         // D
+    ANSWER: 4,           // E
+    COULD_ANSWER: 5,     // F
+    SOURCES: 6,          // G
+    REVIEW_STATUS: 7,    // H
+    SAFE_TO_SEND: 8,     // I
     ACTION_NEEDED: 9,    // J
     REVIEWER_NOTES: 10,  // K
     REVIEWER: 11         // L
   };
 
   var HEADERS_QA_LOG = [
+    'Date',
+    'HelpScout URL',
     'Question ID',
-    'Date/Time',
     'Question',
     'Bot Answer',
     'Could Answer?',
     'Sources',
-    'User Rating',
-    'Referrer',
     'Review Status',
+    'Safe to Send',
     'Action Needed',
     'Reviewer Notes',
     'Reviewer'
   ];
 
   var REVIEW_STATUS_VALUES = ['Pending Review', 'Reviewed'];
+  var SAFE_TO_SEND_VALUES = ['Yes', 'No'];
 
   var ACTION_NEEDED_VALUES = [
     'Good response (no action needed)',
@@ -87,6 +88,7 @@ var Config = (function () {
     getCol: function () { return COL; },
     getHeadersQALog: function () { return HEADERS_QA_LOG; },
     getReviewStatusValues: function () { return REVIEW_STATUS_VALUES; },
+    getSafeToSendValues: function () { return SAFE_TO_SEND_VALUES; },
     getActionNeededValues: function () { return ACTION_NEEDED_VALUES; },
     getConfigKeys: function () {
       return {
